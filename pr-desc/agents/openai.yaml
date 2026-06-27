@@ -1,0 +1,4 @@
+interface:
+  display_name: "PR Desc"
+  short_description: "Generate PR descriptions from templates"
+  default_prompt: "Use $pr-desc to generate a PR description from a project path and starting commit."
