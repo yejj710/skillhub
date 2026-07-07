@@ -1,0 +1,4 @@
+interface:
+  display_name: "Prediction Rerun Audit"
+  short_description: "Find and clear benchmark predictions to rerun"
+  default_prompt: "Use $prediction-rerun-audit to inspect a benchmark output directory and prepare failed or incomplete prediction cases for reuse rerun."
