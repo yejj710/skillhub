@@ -160,44 +160,43 @@ def delete_prediction_ids(run_root: Path, ids: set[int]) -> tuple[dict[str, dict
         return summary, skipped_tmp
 
     for path in files:
-        tmp = path.with_suffix(path.suffix + ".tmp")
         total = kept = removed = 0
         removed_ids = []
-        changed = False
-        with path.open(encoding="utf-8") as src, tmp.open("w", encoding="utf-8") as dst:
+        output_lines: list[str] = []
+        with path.open(encoding="utf-8") as src:
             for line in src:
                 if not line.strip():
-                    dst.write(line)
+                    output_lines.append(line)
                     continue
                 total += 1
                 try:
                     obj = json.loads(line)
                 except Exception:  # noqa: BLE001
                     kept += 1
-                    dst.write(line)
+                    output_lines.append(line)
                     continue
 
                 item_id = as_int_id(obj.get("id"))
                 if item_id in ids:
                     removed += 1
                     removed_ids.append(item_id)
-                    changed = True
                     continue
 
                 kept += 1
-                dst.write(line)
+                output_lines.append(line)
 
-        if changed:
-            tmp.replace(path)
+        if removed:
+            with path.open("r+", encoding="utf-8") as dst:
+                dst.seek(0)
+                dst.writelines(output_lines)
+                dst.truncate()
             summary[str(path)] = {
-                "action": "rewrote_records",
+                "action": "rewrote_records_in_place",
                 "total": total,
                 "removed": removed,
                 "kept": kept,
                 "removed_ids": sorted(removed_ids),
             }
-        else:
-            tmp.unlink()
     return summary, skipped_tmp
 
 

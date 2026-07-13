@@ -1,16 +1,16 @@
 ---
-name: prediction-rerun-audit
+name: aisbench-rerun-audit
 description: Analyze benchmark result JSON files, especially ais_bench/OpenICL outputs with accuracy and details fields, to separate correct=false cases into direct wrong answers versus truncated or unusable model outputs. Use when Codex needs to inspect results/**/*.json, classify failed cases from origin_prediction, predictions, references, and correct, report rerun candidate IDs, wait for user instruction, and optionally clear prediction JSONL records for truncated cases before --reuse reruns.
 ---
 
-# Prediction Rerun Audit
+# AisBench Rerun Audit
 
 ## Workflow
 
 Run the bundled script from the repository root:
 
 ```bash
-python3 .codex/skills/prediction-rerun-audit/scripts/analyze_predictions.py <output-dir>
+python3 .codex/skills/aisbench-rerun-audit/scripts/analyze_predictions.py <output-dir>
 ```
 
 `<output-dir>` is either a timestamp output directory that contains `results/` or the `results/` directory itself.
@@ -46,10 +46,12 @@ After analysis, report the conclusion and wait for the user's instruction. Do no
 Only delete after explicit confirmation. Run:
 
 ```bash
-python3 .codex/skills/prediction-rerun-audit/scripts/analyze_predictions.py <output-dir> --delete
+python3 .codex/skills/aisbench-rerun-audit/scripts/analyze_predictions.py <output-dir> --delete
 ```
 
 Deletion removes prediction JSONL records whose IDs were classified as `truncated` from non-`tmp` files under `predictions/`. It does not delete or inspect `predictions/**/tmp/*.jsonl`.
+
+When rewriting prediction JSONL files, preserve the original file owner/group relationship. Prefer in-place truncation and rewrite of the existing file after preparing the filtered content, rather than replacing the file with a new temporary file.
 
 This cleanup is useful before `--reuse` reruns because ais_bench appends new prediction rows; old truncated rows can otherwise remain and affect later evaluation.
 

@@ -1,4 +1,4 @@
 interface:
-  display_name: "Prediction Rerun Audit"
+  display_name: "AisBench Rerun Audit"
   short_description: "Classify failed benchmark results for rerun"
-  default_prompt: "Use $prediction-rerun-audit to inspect a benchmark output directory, classify correct=false result cases as wrong answers or truncated outputs, and prepare rerun candidates."
+  default_prompt: "Use $aisbench-rerun-audit to inspect a benchmark output directory, classify correct=false result cases as wrong answers or truncated outputs, and prepare rerun candidates."
