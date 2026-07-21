@@ -6,6 +6,7 @@
 | web-access | 一泽 Eze | [eze-is/web-access](https://github.com/eze-is/web-access) |
 | hv-analysis | 数字生命卡兹克 | [hv-analysis](https://github.com/KKKKhazix/Khazix-Skills) |
 | code-guidelines | forrestchang | [andrej-karpathy-skills](https://github.com/forrestchang/andrej-karpathy-skills) |
+| drawio-skill | Agents365-ai | [drawio-skill](https://github.com/Agents365-ai/drawio-skill) |
 
 
 ## License
