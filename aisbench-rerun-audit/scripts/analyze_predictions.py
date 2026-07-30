@@ -4,14 +4,21 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 
-ANSWER_RE = re.compile(r"(?im)(?:^|\b)Answer\s*:\s*([ABCD])\b")
+FINAL_ANSWER_RE = re.compile(
+    r"(?is)(?:answer\s*[:=]|final answer\s*[:=]|\\boxed\s*\{)([^\n}]{1,120})"
+)
+TOKEN_RE = re.compile(r"\\[A-Za-z]+|[A-Za-z0-9]+|[^\sA-Za-z0-9]")
+ALNUM_RE = re.compile(r"[A-Za-z0-9]+")
+NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+CHOICE_RE = re.compile(r"\b[ABCD]\b", re.IGNORECASE)
 
 
 def compact_ids(values: list[object]) -> str:
@@ -62,6 +69,229 @@ def string_list(value: object) -> list[str]:
     return [str(value)]
 
 
+def normalize_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def tokenize(value: str) -> list[str]:
+    return TOKEN_RE.findall(value)
+
+
+def truncated_sample(value: str | None, limit: int = 180) -> str | None:
+    if value is None:
+        return None
+    value = normalize_text(value)
+    return value[:limit]
+
+
+def find_consecutive_repeats(
+    tokens: list[str],
+    block_sizes: tuple[int, ...] = (20, 40, 80, 160),
+    min_repeats: int = 3,
+) -> list[dict]:
+    hits: list[dict] = []
+    token_count = len(tokens)
+    for block_size in block_sizes:
+        index = 0
+        while index + block_size * min_repeats <= token_count:
+            block = tuple(tokens[index : index + block_size])
+            repeat_count = 1
+            next_index = index + block_size
+            while (
+                next_index + block_size <= token_count
+                and tuple(tokens[next_index : next_index + block_size]) == block
+            ):
+                repeat_count += 1
+                next_index += block_size
+            if repeat_count >= min_repeats:
+                hits.append(
+                    {
+                        "kind": "consecutive_ngram",
+                        "block_tokens": block_size,
+                        "occurrences": repeat_count,
+                        "position": index,
+                        "sample": " ".join(tokens[index : index + min(block_size, 60)]),
+                    }
+                )
+                index = next_index
+            else:
+                index += 1
+    return hits
+
+
+def find_repeated_long_ngrams(
+    tokens: list[str],
+    block_tokens: int,
+    min_occurrences: int,
+    limit: int = 3,
+) -> list[dict]:
+    if len(tokens) < block_tokens:
+        return []
+
+    positions_by_hash: dict[bytes, list[int]] = defaultdict(list)
+    for index in range(0, len(tokens) - block_tokens + 1):
+        text = "\x1f".join(tokens[index : index + block_tokens])
+        digest = hashlib.blake2b(text.encode("utf-8"), digest_size=12).digest()
+        positions_by_hash[digest].append(index)
+
+    hits: list[dict] = []
+    for positions in positions_by_hash.values():
+        if len(positions) < min_occurrences:
+            continue
+        first = tuple(tokens[positions[0] : positions[0] + block_tokens])
+        exact_positions = [
+            pos for pos in positions if tuple(tokens[pos : pos + block_tokens]) == first
+        ]
+        if len(exact_positions) >= min_occurrences:
+            hits.append(
+                {
+                    "kind": "repeated_ngram_anywhere",
+                    "block_tokens": block_tokens,
+                    "occurrences": len(exact_positions),
+                    "positions": exact_positions[:8],
+                    "sample": " ".join(first[:60]),
+                }
+            )
+
+    hits.sort(key=lambda item: (item["occurrences"], item["block_tokens"]), reverse=True)
+    return hits[:limit]
+
+
+def find_repeated_text_units(
+    origin: str,
+    *,
+    unit: str,
+    min_chars: int,
+    min_occurrences: int,
+    limit: int = 3,
+) -> list[dict]:
+    if unit == "line":
+        parts = origin.splitlines()
+    elif unit == "paragraph":
+        parts = re.split(r"\n\s*\n+", origin)
+    else:
+        raise ValueError(f"unknown repeat unit: {unit}")
+
+    normalized = [normalize_text(part) for part in parts]
+    counts = Counter(part for part in normalized if len(part) >= min_chars)
+    hits = []
+    for text, count in counts.most_common():
+        if count < min_occurrences:
+            continue
+        hits.append(
+            {
+                "kind": f"repeated_{unit}",
+                "occurrences": count,
+                "sample": text[:260],
+            }
+        )
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def detect_large_repetition(origin: object) -> dict:
+    info = {
+        "large_repeat": False,
+        "large_repeat_reasons": "",
+        "large_repeat_summary": "",
+    }
+    if not isinstance(origin, str) or not origin:
+        return info
+
+    tokens = tokenize(origin)
+    hits = []
+    hits.extend(find_consecutive_repeats(tokens))
+    hits.extend(find_repeated_long_ngrams(tokens, block_tokens=80, min_occurrences=3))
+    hits.extend(find_repeated_long_ngrams(tokens, block_tokens=160, min_occurrences=2))
+    hits.extend(
+        find_repeated_text_units(
+            origin,
+            unit="paragraph",
+            min_chars=180,
+            min_occurrences=3,
+        )
+    )
+    hits.extend(
+        find_repeated_text_units(
+            origin,
+            unit="line",
+            min_chars=100,
+            min_occurrences=3,
+        )
+    )
+
+    if not hits:
+        return info
+
+    reasons = Counter(hit["kind"] for hit in hits)
+    summary_parts = []
+    for hit in hits[:4]:
+        if hit["kind"] in {"consecutive_ngram", "repeated_ngram_anywhere"}:
+            summary_parts.append(
+                f"{hit['kind']}:block={hit['block_tokens']}:occ={hit['occurrences']}:"
+                f"sample={truncated_sample(str(hit.get('sample')))}"
+            )
+        else:
+            summary_parts.append(
+                f"{hit['kind']}:occ={hit['occurrences']}:"
+                f"sample={truncated_sample(str(hit.get('sample')))}"
+            )
+
+    info["large_repeat"] = True
+    info["large_repeat_reasons"] = ",".join(f"{key}:{value}" for key, value in sorted(reasons.items()))
+    info["large_repeat_summary"] = " | ".join(summary_parts)
+    return info
+
+
+def alnum_tokens(values: list[str]) -> set[str]:
+    tokens = set()
+    for value in values:
+        tokens.update(token.lower() for token in ALNUM_RE.findall(value))
+    return tokens
+
+
+def number_tokens(values: list[str]) -> set[str]:
+    numbers = set()
+    for value in values:
+        numbers.update(NUMBER_RE.findall(value))
+    return numbers
+
+
+def choice_tokens(values: list[str]) -> set[str]:
+    choices = set()
+    for value in values:
+        choices.update(choice.upper() for choice in CHOICE_RE.findall(value))
+    return choices
+
+
+def predictions_unrelated_to_references(predictions: list[str], references: list[str]) -> bool:
+    if not predictions or not references:
+        return False
+
+    nonempty_predictions = [prediction.strip() for prediction in predictions if prediction.strip()]
+    nonempty_references = [reference.strip() for reference in references if reference.strip()]
+    if not nonempty_predictions or not nonempty_references:
+        return False
+
+    reference_numbers = number_tokens(nonempty_references)
+    prediction_numbers = number_tokens(nonempty_predictions)
+    if reference_numbers:
+        return not prediction_numbers
+
+    reference_choices = choice_tokens(nonempty_references)
+    if reference_choices:
+        return not choice_tokens(nonempty_predictions)
+
+    reference_tokens = alnum_tokens(nonempty_references)
+    prediction_tokens = alnum_tokens(nonempty_predictions)
+    if reference_tokens & prediction_tokens:
+        return False
+
+    prediction_text = " ".join(nonempty_predictions)
+    return len(prediction_text) > 16 or len(prediction_tokens) > 4
+
+
 def classify_false_case(detail: dict) -> dict:
     origin = detail.get("origin_prediction")
     predictions = string_list(detail.get("predictions"))
@@ -74,6 +304,7 @@ def classify_false_case(detail: dict) -> dict:
         "has_think_close": False,
         "answer_any": None,
         "answer_after": None,
+        "prediction_reference_relation": "not_checked",
         "prediction": ",".join(predictions),
         "reference": ",".join(references),
     }
@@ -83,21 +314,17 @@ def classify_false_case(detail: dict) -> dict:
         info["reason"] = "no_origin_prediction"
         return info
 
-    answers_any = ANSWER_RE.findall(origin)
-    info["answer_any"] = (answers_any or [None])[-1]
+    answers_any = FINAL_ANSWER_RE.findall(origin)
+    info["answer_any"] = truncated_sample((answers_any or [None])[-1], limit=80)
 
     if "</think>" in origin:
         info["has_think_close"] = True
         after = origin.split("</think>", 1)[1]
-        answers_after = ANSWER_RE.findall(after)
-        info["answer_after"] = (answers_after or [None])[-1]
-        if info["answer_after"] is None:
-            info["classification"] = "truncated"
-            info["reason"] = "no_answer_after_think"
-            return info
-    elif info["answer_any"] is None:
+        answers_after = FINAL_ANSWER_RE.findall(after)
+        info["answer_after"] = truncated_sample((answers_after or [None])[-1], limit=80)
+    else:
         info["classification"] = "truncated"
-        info["reason"] = "missing_final_answer"
+        info["reason"] = "missing_think_close"
         return info
 
     if not predictions:
@@ -105,6 +332,13 @@ def classify_false_case(detail: dict) -> dict:
         info["reason"] = "no_extracted_prediction"
         return info
 
+    if predictions_unrelated_to_references(predictions, references):
+        info["classification"] = "truncated"
+        info["reason"] = "prediction_reference_unrelated"
+        info["prediction_reference_relation"] = "unrelated"
+        return info
+
+    info["prediction_reference_relation"] = "related"
     return info
 
 
@@ -134,6 +368,7 @@ def load_result_records(files: list[Path]) -> tuple[list[dict], list[dict]]:
                 "correct": correct,
                 "is_false": is_false_case(correct),
             }
+            record.update(detect_large_repetition(detail.get("origin_prediction")))
             if record["is_false"]:
                 record.update(classify_false_case(detail))
             records.append(record)
@@ -211,8 +446,16 @@ def print_report(
     false_cases = [r for r in records if r["is_false"]]
     truncated = [r for r in false_cases if r.get("classification") == "truncated"]
     wrong = [r for r in false_cases if r.get("classification") == "wrong_answer"]
+    large_repeats = [r for r in records if r.get("large_repeat")]
     class_counts = Counter(r.get("classification", "unknown") for r in false_cases)
     reason_counts = Counter(r.get("reason", "unknown") for r in false_cases)
+    repeat_reason_counts = Counter()
+    for rec in large_repeats:
+        for item in str(rec.get("large_repeat_reasons", "")).split(","):
+            if not item:
+                continue
+            key, _, value = item.partition(":")
+            repeat_reason_counts[key] += int(value or 1)
 
     print(f"root: {root}")
     print("source: results")
@@ -226,6 +469,9 @@ def print_report(
     print(f"reason_counts: {dict(reason_counts)}")
     print(f"truncated_ids_sorted: {compact_ids([r['id'] for r in truncated])}")
     print(f"wrong_answer_ids_sorted: {compact_ids([r['id'] for r in wrong])}")
+    print(f"large_repeat_cases: {len(large_repeats)}")
+    print(f"large_repeat_reason_counts: {dict(repeat_reason_counts)}")
+    print(f"large_repeat_ids_sorted: {compact_ids([r['id'] for r in large_repeats])}")
 
     if errors:
         print("\nPARSE_ERRORS")
@@ -238,8 +484,19 @@ def print_report(
             f"{rec['file']} id={rec['id']} class={rec['classification']} "
             f"reason={rec['reason']} pred={rec['prediction']} ref={rec['reference']} "
             f"origin_len={rec['origin_len']} has_think_close={rec['has_think_close']} "
-            f"answer_any={rec['answer_any']} answer_after={rec['answer_after']}"
+            f"answer_any={rec['answer_any']} answer_after={rec['answer_after']} "
+            f"pred_ref_relation={rec['prediction_reference_relation']} "
+            f"large_repeat={rec.get('large_repeat', False)}"
         )
+
+    if large_repeats:
+        print("\nLARGE_REPEAT_DETAIL")
+        for rec in sorted(large_repeats, key=lambda r: (str(r["file"]), r["id"] if r["id"] is not None else -1)):
+            print(
+                f"{rec['file']} id={rec['id']} correct={rec['correct']} "
+                f"is_false={rec['is_false']} reasons={rec['large_repeat_reasons']} "
+                f"summary={rec['large_repeat_summary']}"
+            )
 
     if deleted is not None:
         print("\nDELETED")
