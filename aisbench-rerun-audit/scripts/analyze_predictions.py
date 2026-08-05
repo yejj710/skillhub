@@ -244,6 +244,20 @@ def detect_large_repetition(origin: object) -> dict:
     return info
 
 
+def repeat_review_status(record: dict) -> str:
+    if record.get("is_false"):
+        return f"false/{record.get('classification', 'unknown')}"
+    return "correct"
+
+
+def repeat_review_snippet(record: dict, limit: int = 260) -> str:
+    summary = str(record.get("large_repeat_summary") or "")
+    if not summary:
+        return ""
+    first = summary.split(" | ", 1)[0]
+    return truncated_sample(first, limit=limit) or ""
+
+
 def alnum_tokens(values: list[str]) -> set[str]:
     tokens = set()
     for value in values:
@@ -362,13 +376,17 @@ def load_result_records(files: list[Path]) -> tuple[list[dict], list[dict]]:
                 continue
             item_id = as_int_id(key)
             correct = detail.get("correct")
+            origin = detail.get("origin_prediction")
             record = {
                 "file": path,
                 "id": item_id,
                 "correct": correct,
                 "is_false": is_false_case(correct),
+                "origin_len": len(origin) if isinstance(origin, str) else None,
+                "prediction": ",".join(string_list(detail.get("predictions"))),
+                "reference": ",".join(string_list(detail.get("references"))),
             }
-            record.update(detect_large_repetition(detail.get("origin_prediction")))
+            record.update(detect_large_repetition(origin))
             if record["is_false"]:
                 record.update(classify_false_case(detail))
             records.append(record)
@@ -496,6 +514,15 @@ def print_report(
                 f"{rec['file']} id={rec['id']} correct={rec['correct']} "
                 f"is_false={rec['is_false']} reasons={rec['large_repeat_reasons']} "
                 f"summary={rec['large_repeat_summary']}"
+            )
+
+        print("\nLARGE_REPEAT_SNIPPET_SUMMARY")
+        for rec in sorted(large_repeats, key=lambda r: (str(r["file"]), r["id"] if r["id"] is not None else -1)):
+            print(
+                f"id={rec['id']} status={repeat_review_status(rec)} "
+                f"pred={rec.get('prediction', '')} ref={rec.get('reference', '')} "
+                f"origin_len={rec.get('origin_len')} reasons={rec['large_repeat_reasons']} "
+                f"snippet={repeat_review_snippet(rec)}"
             )
 
     if deleted is not None:

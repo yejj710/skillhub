@@ -1,6 +1,6 @@
 ---
 name: aisbench-rerun-audit
-description: Analyze benchmark result JSON files, especially ais_bench/OpenICL outputs with accuracy and details fields, to separate correct=false cases into direct wrong answers versus truncated or unusable model outputs. Use when Codex needs to inspect results/**/*.json, classify failed cases from origin_prediction, predictions, references, and correct, report rerun candidate IDs, wait for user instruction, and optionally clear prediction JSONL records for truncated cases before --reuse reruns.
+description: Analyze benchmark result JSON files, especially ais_bench/OpenICL outputs with accuracy and details fields, to separate correct=false cases into direct wrong answers versus truncated or unusable model outputs, and summarize large repeated-output snippets for manual review. Use when Codex needs to inspect results/**/*.json, classify failed cases from origin_prediction, predictions, references, and correct, report rerun candidate IDs, report large_repeat IDs with human-review snippet summaries, wait for user instruction, and optionally clear prediction JSONL records for truncated cases before --reuse reruns.
 ---
 
 # AisBench Rerun Audit
@@ -51,6 +51,8 @@ The analyzer also checks every result record, including correct records, for lar
 
 Report these as `large_repeat` cases separately from `truncated` and `wrong_answer`. Do not treat `large_repeat` by itself as a rerun candidate, and do not delete prediction records only because they have large repeated content. These are precision-quality cases that should be pulled out for separate analysis.
 
+Also preserve a human-review summary for every `large_repeat` ID. The summary must show the repeated-output manifestation, not only the ID list. Include the record ID, whether it was correct or failed, its failure classification if any, prediction/reference, repeat reason counts, and one short repeated snippet or pattern with occurrence counts. Keep snippets short; never paste the full `origin_prediction`.
+
 ## Confirmation Before Deletion
 
 After analysis, report the conclusion and wait for the user's instruction. Do not delete records during the first analysis pass.
@@ -78,6 +80,11 @@ Keep the final response concise:
 - List `truncated` IDs separately from `wrong_answer` IDs.
 - List `large_repeat` IDs and reason counts separately; make clear that they are not rerun candidates unless they also satisfy the `truncated` criteria.
 - Explain the conclusion: which IDs should be rerun and which look like direct wrong answers.
+- After the conclusion, add a `Large repeat snippet summary` section for manual review. Prefer the analyzer's `LARGE_REPEAT_SNIPPET_SUMMARY` block when available. For each `large_repeat` ID, include:
+  - `id`, correctness/failure status, classification if failed, prediction/reference, and output length when available.
+  - repeat reason counts and the strongest repeated pattern, including block size or text unit and occurrence count.
+  - a concise repeated snippet, truncated to roughly one sentence or 200 characters.
+  - a quick tag such as obvious loop, repeated option list, repeated formula/sequence, repeated reasoning paragraph, or mild repeated line when the pattern is clear.
 - If deletion was performed, mention modified prediction files and removed IDs.
 - If only analysis was performed, say deletion is pending user confirmation.
 
